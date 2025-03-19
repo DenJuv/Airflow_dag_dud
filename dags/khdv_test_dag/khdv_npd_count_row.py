@@ -10,8 +10,11 @@ from airflow.hooks.base_hook import BaseHook
 from airflow.utils.email import send_email
 #from sqlalchemy import create_engine
 from datetime import datetime, timedelta
+import pytz
+import os
+import logging
 
-connection = BaseHook.get_connection("main_postgresql_connection")
+#connection = BaseHook.get_connection("main_postgresql_connection")
 hook = PostgresHook(postgres_conn_id = 'main_postgresql_connection')
 
 file_path = '/opt/airflow/scripts/'
@@ -19,9 +22,10 @@ include_path = '/opt/airflow/scripts/'
 scripts_path = include_path + 'sql_scripts.sql'
 select_path = include_path + 'select.sql'
 sys.path.append(include_path)
-
-current_date = datetime.now().strftime('%Y-%m-%d')
-out_file = file_path + f'file_{current_date}.csv'
+timezone = pytz.timezone('Europe/Moscow')
+current_date = datetime.now(timezone).strftime('%Y-%m-%d')
+current_date_time = datetime.now(timezone).strftime('%Y-%m-%d %H:%M:%S')
+out_file = file_path + f'khdv_npd_table_row_{current_date}.csv'
 
 default_args = {
     "owner": "DUD_CKKD",
@@ -46,19 +50,29 @@ def execute_sql_select_save(**kwargs):
     result = cursor.fetchall()
     colnames = [desc[0] for desc in cursor.description]
     df = pd.DataFrame(result, columns=colnames)
-    #df.to_csv(out_file, index=False)
-    # Проверка на пустой DataFrame
+
+    #logging.info("\n" +'LOOOOOOOOOOOOOG - >'+ df.head(10).to_string())
     if df.empty:
-        df.to_csv(out_file, index=False)
         kwargs['ti'].xcom_push(key='is_empty', value=True)
     else:
+        df.to_csv(out_file, index=False)
         kwargs['ti'].xcom_push(key='is_empty', value=False)
     cursor.close()
     conn.close()
 
 def check_df_empty(**kwargs):
-    is_empty = kwargs['ti'].xcom_pull(task_ids='select_save', key='is_empty')
-    return is_empty
+    is_empty = kwargs['ti'].xcom_pull(task_ids='select_save_task', key='is_empty')
+    if is_empty:
+        return 'send_email_null_task'  # Если DataFrame пустой, переход к таске
+    else:
+        return 'send_email_notnull_task'  # Если DataFrame не пустой, переходим
+
+def delete_file_if_exists():
+    if os.path.exists(out_file):
+        os.remove(out_file)
+        print(f'Файл {out_file} успешно удален.')
+    else:
+        print(f'Файл {out_file} не существует.')
 
 with DAG(
      'khdv_npd_count_row',
@@ -71,39 +85,61 @@ with DAG(
      tags = ["dud_ckkd", "npd", "count_rows"]
 ) as dag:
 
-    start = DummyOperator(task_id = "start", dag=dag)
+    start = DummyOperator(task_id = "start", dag=dag,)
 
-    # Задача для выполнения SQL-скрипта
-    run_sql_script = PythonOperator(
-        task_id='run_sql_script',
+    sql_script_task = PythonOperator(
+        task_id='sql_script_task',
         python_callable=execute_sql_script,
         dag=dag,
     )
 
-    select_save = PythonOperator(
-        task_id='select_save',
+    select_save_task = PythonOperator(
+        task_id='select_save_task',
         python_callable=execute_sql_select_save,
         provide_context=True,
         dag=dag,
     )
 
-    check_empty = BranchPythonOperator(
-        task_id='check_empty',
+    check_empty_task = BranchPythonOperator(
+        task_id='check_empty_task',
         python_callable=check_df_empty,
         provide_context=True,
         dag=dag,
     )
 
-    send_email = EmailOperator(
-        task_id='send_email',
+    send_email_notnull_task = EmailOperator(
+        task_id='send_email_notnull_task',
         to='annakhripkovafbst@gmail.com',
-        subject='DAG выполнен успешно',
-        html_content='DAG выполнен успешно.',
+        subject='DAG отработал успешно',
+        html_content=f'''
+            DAG отработал корректно в : - {current_date_time} .<br>
+            файл с добавленными строками во вложении
+        ''',
         files = [out_file],
         dag=dag,
     )
 
-    end = DummyOperator(task_id = "end", dag=dag)
+    send_email_null_task = EmailOperator(
+        task_id='send_email_null_task',
+        to='annakhripkovafbst@gmail.com',
+        subject='DAG отработал с ошибкой!',
+        html_content=f'DAG отработал с ошибкой: - {current_date_time}',
+        dag=dag,
+    )
 
-start >> run_sql_script >> select_save >> send_email >> end
+    merge_tasks = DummyOperator(task_id='merge_tasks', trigger_rule="none_failed_or_skipped", dag=dag,)
+
+    delete_file_task = PythonOperator(
+        task_id='delete_file_task',
+        python_callable=delete_file_if_exists,
+        dag=dag,
+    )
+
+    end = DummyOperator(task_id = "end", dag=dag,)
+
+start >> sql_script_task >> select_save_task >> check_empty_task
+check_empty_task >> send_email_notnull_task >> merge_tasks
+check_empty_task >> send_email_null_task >> merge_tasks
+merge_tasks >> delete_file_task >> end
+
 
