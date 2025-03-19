@@ -7,7 +7,7 @@ from airflow.hooks.base_hook import BaseHook
 connection = BaseHook.get_connection("main_postgresql_connection")
 
 default_args = {
-    "owner": "etl_user",
+    "owner": "DUD_CKKD",
     "depends_on_past": False,
     "start_date": datetime(2025, 3, 17),
     "retries": 5,
