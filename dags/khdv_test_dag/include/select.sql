@@ -1,0 +1,1 @@
+select * from ckkd.khdv_npd_table_row_count;
